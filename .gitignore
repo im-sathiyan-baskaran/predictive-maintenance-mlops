@@ -1,0 +1,4 @@
+venv/
+artifacts/
+local-setup.md
+Dockerfile
