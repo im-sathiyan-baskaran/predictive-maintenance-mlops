@@ -3,9 +3,9 @@
 *Building a minimal but real MLOps loop end to end.*
 
 This repo trains a machine-failure classifier on industrial sensor data and
-wires it into a full **train → validate → serve → CI** pipeline. It's
-deliberately small in scope so the *plumbing* stays visible — the
-interesting part isn't the model, it's everything around it.
+wires it into a full **train → validate → serve → containerize → CI**
+pipeline. It's deliberately small in scope so the *plumbing* stays visible —
+the interesting part isn't the model, it's everything around it.
 
 ---
 
@@ -35,6 +35,12 @@ flowchart LR
         D2["app.py\n(Flask API)"]
     end
 
+    subgraph Container["Docker"]
+        E1["Dockerfile\npython:3.12-slim"]
+        E2["RUN python train.py\n(trains at build time)"]
+        E3["gunicorn serves app.py\non :5000"]
+    end
+
     subgraph CI["GitHub Actions CI"]
         F["Quality gate\nrecall < 0.5 fails build"]
         G["Upload artifacts\n(model.pkl + metrics.json)"]
@@ -48,12 +54,16 @@ flowchart LR
     C2 -. "decision_threshold" .-> D1
     C2 -. "decision_threshold" .-> D2
     B --> F --> G
+    A -. "COPY . ." .-> E1 --> E2 --> E3
 
     style A fill:#e8eaf6,stroke:#5c6bc0
     style C1 fill:#e0f2f1,stroke:#00897b
     style C2 fill:#e0f2f1,stroke:#00897b
     style D1 fill:#fff3e0,stroke:#fb8c00
     style D2 fill:#fff3e0,stroke:#fb8c00
+    style E1 fill:#ede7f6,stroke:#7e57c2
+    style E2 fill:#ede7f6,stroke:#7e57c2
+    style E3 fill:#ede7f6,stroke:#7e57c2
     style F fill:#fce4ec,stroke:#d81b60
     style G fill:#fce4ec,stroke:#d81b60
 ```
@@ -85,10 +95,11 @@ That forces real decisions instead of a dataset swap in name only:
 
 ```
 .github/workflows/ci.yaml  # train -> quality gate -> upload artifacts
-data/ai4i2020.csv         # AI4I 2020 dataset (UCI ML Repository)
-train.py                  # trains the model, writes artifacts/
-run_model.py               # CLI predictor
-app.py                     # Flask API (/health, /predict)
+data/ai4i2020.csv          # AI4I 2020 dataset (UCI ML Repository)
+train.py                   # trains the model, writes artifacts/
+run_model.py                # CLI predictor
+app.py                      # Flask API (/health, /predict)
+Dockerfile                  # trains at build time, serves via gunicorn
 requirements.txt
 ```
 
@@ -134,6 +145,27 @@ curl -X POST http://127.0.0.1:5000/predict \
 
 ---
 
+## Docker
+
+```bash
+docker build -t predictive-maintenance-mlops .
+docker run -p 5000:5000 predictive-maintenance-mlops
+
+# in another terminal:
+curl -X POST http://127.0.0.1:5000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"type":"L","air_temp":302,"process_temp":311,"rpm":1350,"torque":65,"tool_wear":220}'
+```
+
+The image trains the model at build time (`RUN python train.py`) so it
+ships ready to serve — no separate artifact-download step. In a real
+deployment you'd instead pull a pre-trained `artifacts/model.pkl` from a
+registry (S3, Artifactory) and `COPY` it in, rather than retraining inside
+the image build. The container serves via `gunicorn` instead of Flask's
+dev server (`python app.py`), which is what production actually runs.
+
+---
+
 ## Continuous Integration
 
 [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml) runs on every push
@@ -158,8 +190,8 @@ predictive-maintenance conditions.
   and compare PR-AUC.
 - Log per-`Type` (L/M/H) recall separately — failure dynamics differ by
   product variant.
-- Containerize with a `Dockerfile` and push the image to a registry
-  (ECR/JFrog Artifactory), deployed behind ArgoCD.
+- Push the Docker image to a registry (ECR/JFrog Artifactory) and deploy
+  behind ArgoCD instead of `docker run` directly.
 - Add a `/metrics` endpoint exposing prediction counts and probability
   distribution for Dynatrace/ELK-style monitoring in production.
 
