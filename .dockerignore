@@ -1,0 +1,7 @@
+.git/
+venv/
+.venv/
+artifacts/
+__pycache__/
+*.pyc
+.dvc/cache/
