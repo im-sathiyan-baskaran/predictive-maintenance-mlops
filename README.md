@@ -188,7 +188,12 @@ binary blobs that grow every time the dataset changes.
 
 ## Docker
 
+`data/ai4i2020.csv` must already exist locally before building — it's
+DVC-tracked, not committed, and `COPY . .` only sees what's actually on
+disk. Run `dvc pull` first (same precondition CI has):
+
 ```bash
+dvc pull
 docker build -t predictive-maintenance-mlops .
 docker run -p 5000:5000 predictive-maintenance-mlops
 
@@ -237,10 +242,14 @@ and PR to `main`.
 **`build_and_push_image`** — runs only on pushes to `main` (not PRs), after
 the training job succeeds:
 
-1. Log in to `ghcr.io` using the built-in `GITHUB_TOKEN` — no extra secret
+1. Assume the S3 read role via OIDC and pull the dataset (same
+   cache-or-pull step as the training job — `RUN python train.py` inside
+   the Docker build needs the CSV physically present in the build context,
+   since `COPY . .` only sees what's actually on disk, not what git tracks)
+2. Log in to `ghcr.io` using the built-in `GITHUB_TOKEN` — no extra secret
    to manage
-2. Build the `Dockerfile`
-3. Push it as `ghcr.io/im-sathiyan-baskaran/predictive-maintenance-mlops`,
+3. Build the `Dockerfile`
+4. Push it as `ghcr.io/im-sathiyan-baskaran/predictive-maintenance-mlops`,
    tagged `latest` and `sha-<short-sha>`
 
 Gating the image push on the training job's matrix (`needs:`) means a
