@@ -1,3 +1,5 @@
 venv/
 artifacts/
 local-setup.md
+s3-read-policy.json
+trust-policy.json
