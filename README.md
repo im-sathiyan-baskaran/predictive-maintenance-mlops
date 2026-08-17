@@ -15,7 +15,9 @@ everything around it.
 ```mermaid
 flowchart LR
     subgraph Data
+        S3[("S3 remote\nvia DVC")]
         A[("data/ai4i2020.csv\nAI4I 2020 dataset")]
+        S3 -- "dvc pull\n(skipped if cache-hit)" --> A
     end
 
     subgraph Training
@@ -63,6 +65,7 @@ flowchart LR
     E1 -. "same Dockerfile" .-> H
     H --> R
 
+    style S3 fill:#e8eaf6,stroke:#5c6bc0
     style A fill:#e8eaf6,stroke:#5c6bc0
     style C1 fill:#e0f2f1,stroke:#00897b
     style C2 fill:#e0f2f1,stroke:#00897b
@@ -103,12 +106,12 @@ That forces real decisions instead of a dataset swap in name only:
 ## Project layout
 
 ```
-.github/workflows/ci.yaml  # train -> quality gate -> build & push image to ghcr
-data/ai4i2020.csv          # AI4I 2020 dataset (UCI ML Repository)
-train.py                   # trains the model, writes artifacts/
-run_model.py                # CLI predictor
-app.py                      # Flask API (/health, /predict)
-Dockerfile                  # trains at build time, serves via gunicorn
+.github/workflows/ci.yaml   # pull data -> train -> quality gate -> build & push image to ghcr
+data/ai4i2020.csv.dvc       # DVC pointer (md5 + size) — the CSV itself is not committed
+train.py                    # trains the model, writes artifacts/
+run_model.py                 # CLI predictor
+app.py                       # Flask API (/health, /predict)
+Dockerfile                   # trains at build time, serves via gunicorn
 requirements.txt
 ```
 
@@ -119,6 +122,10 @@ requirements.txt
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+
+# dataset is DVC-tracked (not committed) — pull it from the S3 remote first;
+# requires AWS credentials with read access to the dvc remote bucket
+dvc pull
 
 python train.py
 # Saved artifacts/model.pkl
@@ -151,6 +158,31 @@ curl -X POST http://127.0.0.1:5000/predict \
 |---|---|---|---|
 | `/health` | GET | — | `{"status": "ok"}` |
 | `/predict` | POST | `{"type","air_temp","process_temp","rpm","torque","tool_wear"}` | `{"machine_failure","failure_probability","decision_threshold"}` |
+
+---
+
+## Data versioning (DVC + S3)
+
+`data/ai4i2020.csv` is tracked with [DVC](https://dvc.org) instead of git —
+git only holds `data/ai4i2020.csv.dvc`, a pointer file with the dataset's
+md5 hash and size. The actual bytes live in an S3 bucket
+(`.dvc/config`), fetched on demand with `dvc pull`.
+
+- **Locally**: needs AWS credentials (`aws configure` / SSO) with read
+  access to the remote bucket.
+- **In CI**: no stored credentials at all — the workflow assumes an IAM
+  role via OpenID Connect (`aws-actions/configure-aws-credentials` +
+  `permissions: id-token: write`), so there's no long-lived AWS key sitting
+  in GitHub Secrets.
+- **Caching**: the pulled CSV is cached with `actions/cache`, keyed on the
+  `.dvc` file's hash. Unless the dataset actually changes, later CI runs
+  skip the S3 pull entirely instead of re-downloading it on every push and
+  for every Python version in the matrix.
+
+Why not just commit the CSV? At 512KB it barely matters here — this is
+about practicing the pattern DVC exists for: keep git for code, keep a
+content-addressed remote for data, and never bloat repo history with
+binary blobs that grow every time the dataset changes.
 
 ---
 
@@ -195,9 +227,12 @@ and PR to `main`.
 
 **`train_and_save_modeL`** — matrix across Python 3.10/3.11/3.12:
 
-1. Install dependencies
-2. Train the model
-3. Upload `artifacts/` (model + metrics) as a build artifact per Python version
+1. Assume the S3 read role via OIDC
+2. Install dependencies
+3. Pull `data/ai4i2020.csv` from the DVC remote (cached — skipped if the
+   dataset hasn't changed since the last run)
+4. Train the model
+5. Upload `artifacts/` (model + metrics) as a build artifact per Python version
 
 **`build_and_push_image`** — runs only on pushes to `main` (not PRs), after
 the training job succeeds:
