@@ -54,9 +54,26 @@ jobs:
         run: dvc pull
       
       - name: Train the model
+        # No --model flag -> defaults to rf, matching the model this repo has
+        # always shipped. MLflow tracking inside train.py is best-effort: this
+        # runner can't reach a local kind cluster, so it logs a warning and
+        # continues rather than failing the build.
         run: |
           python train.py
           ls -la artifacts
+
+      - name: Quality gate
+        run: |
+          python - <<'EOF'
+          import json
+          with open("artifacts/metrics.json") as f:
+              m = json.load(f)
+          print(f"recall={m['recall']} f1={m['f1']} roc_auc={m['roc_auc']}")
+          # AI4I failures are ~3.4% of rows, so accuracy alone would pass even
+          # if the model stopped catching real failures. Gate on recall, the
+          # number that actually matters for this problem.
+          assert m["recall"] >= 0.5, f"recall regressed below 0.5: {m['recall']}"
+          EOF
       
       - name: upload-to-artifacts
         uses: actions/upload-artifact@v7

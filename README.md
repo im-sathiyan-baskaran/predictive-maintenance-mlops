@@ -21,16 +21,20 @@ flowchart LR
     end
 
     subgraph Training
-        B["train.py"]
+        B["train.py --model rf|gbm|xgb"]
         B1["Drop leaky columns\n(TWF, HDF, PWF, OSF, RNF)"]
         B2["Preprocess\n(OneHotEncode Type)"]
-        B3["RandomForestClassifier\nclass_weight=balanced"]
-        B4["Sweep decision threshold\nfor best F1 → 0.30"]
+        B3["rf: class_weight=balanced\ngbm: sample_weight\nxgb: scale_pos_weight"]
+        B4["Fixed decision threshold\n(0.30, same across models)"]
     end
 
     subgraph Artifacts
         C1[("artifacts/model.pkl")]
         C2[("artifacts/metrics.json")]
+    end
+
+    subgraph Tracking["Experiment tracking (local, optional)"]
+        M[("MLflow server\nkind + Postgres")]
     end
 
     subgraph Inference
@@ -55,6 +59,7 @@ flowchart LR
     A --> B --> B1 --> B2 --> B3 --> B4
     B4 --> C1
     B4 --> C2
+    B4 -. "log params/metrics/model\nbest-effort — skipped if unreachable" .-> M
     C1 --> D1
     C1 --> D2
     C2 -. "decision_threshold" .-> D1
@@ -78,6 +83,7 @@ flowchart LR
     style G fill:#fce4ec,stroke:#d81b60
     style H fill:#fce4ec,stroke:#d81b60
     style R fill:#e0f2f1,stroke:#00897b
+    style M fill:#fff9c4,stroke:#f9a825
 ```
 
 `train.py` is the single source of truth: it produces both the model and the
@@ -108,7 +114,8 @@ That forces real decisions instead of a dataset swap in name only:
 ```
 .github/workflows/ci.yaml   # pull data -> train -> quality gate -> build & push image to ghcr
 data/ai4i2020.csv.dvc       # DVC pointer (md5 + size) — the CSV itself is not committed
-train.py                    # trains the model, writes artifacts/
+docs/mlflow-setup.md         # connecting train.py to a self-hosted MLflow server
+train.py                    # trains the model (rf/gbm/xgb), writes artifacts/, logs to MLflow
 run_model.py                 # CLI predictor
 app.py                       # Flask API (/health, /predict)
 Dockerfile                   # trains at build time, serves via gunicorn
@@ -128,6 +135,10 @@ pip install -r requirements.txt
 dvc pull
 
 python train.py
+# defaults to --model rf (RandomForest) — this is what CI and the Docker
+# image always train. gbm and xgb are available for local comparison:
+#   python train.py --model gbm
+#   python train.py --model xgb
 # Saved artifacts/model.pkl
 # {
 #   "decision_threshold": 0.3,
@@ -186,6 +197,35 @@ binary blobs that grow every time the dataset changes.
 
 ---
 
+## Experiment tracking (MLflow)
+
+`train.py --model {rf,gbm,xgb}` trains three different approaches to the
+same imbalance problem, each logged to MLflow as a separate run — params,
+metrics, and the fitted pipeline itself, comparable side by side instead
+of eyeballed from printed JSON. See
+[`docs/mlflow-setup.md`](docs/mlflow-setup.md) for connecting `train.py`
+to a self-hosted server (kind + Postgres backend store).
+
+| Model | Imbalance handling | Precision | Recall | F1 | PR-AUC |
+|---|---|---|---|---|---|
+| RandomForest (default) | `class_weight="balanced"` | 0.75 | 0.71 | **0.73** | 0.77 |
+| GradientBoosting | `sample_weight` (no native `class_weight`) | 0.35 | 0.87 | 0.50 | 0.69 |
+| XGBoost | `scale_pos_weight=28.5` | 0.61 | 0.81 | 0.70 | **0.82** |
+
+No clean winner — RandomForest has the best F1, XGBoost the best PR-AUC.
+All three trained at the same fixed 0.30 decision threshold so the
+comparison is apples-to-apples: same cutoff, different model. RandomForest
+stays the default (what CI and the Docker image train) since F1 is the
+more defensible headline number here; `--model xgb` is the pick if
+ranking quality (PR-AUC) matters more than the default threshold's exact
+precision/recall tradeoff.
+
+Tracking is best-effort: your kind cluster isn't reachable from GitHub's
+runners, so CI trains normally without it — `docs/mlflow-setup.md` covers
+why that's by design, not a gap.
+
+---
+
 ## Docker
 
 `data/ai4i2020.csv` must already exist locally before building — it's
@@ -237,7 +277,10 @@ and PR to `main`.
 3. Pull `data/ai4i2020.csv` from the DVC remote (cached — skipped if the
    dataset hasn't changed since the last run)
 4. Train the model
-5. Upload `artifacts/` (model + metrics) as a build artifact per Python version
+5. Quality gate — asserts `recall >= 0.5` on `artifacts/metrics.json`,
+   failing the job (and therefore the image build downstream) if a
+   retrain quietly regresses
+6. Upload `artifacts/` (model + metrics) as a build artifact per Python version
 
 **`build_and_push_image`** — runs only on pushes to `main` (not PRs), after
 the training job succeeds:
@@ -266,8 +309,12 @@ predictive-maintenance conditions.
 
 ## Ideas for further tweaks
 
-- Swap `RandomForestClassifier` for `GradientBoostingClassifier` or XGBoost
-  and compare PR-AUC.
+- ~~Swap `RandomForestClassifier` for `GradientBoostingClassifier` or
+  XGBoost and compare PR-AUC.~~ Done — see
+  [Experiment tracking](#experiment-tracking-mlflow) above.
+- Promote the winning MLflow run to the Model Registry and have `train.py`
+  (or a separate `serve.py`) load "Production" by name/stage instead of a
+  local `artifacts/model.pkl`.
 - Log per-`Type` (L/M/H) recall separately — failure dynamics differ by
   product variant.
 - Deploy the published `ghcr.io` image behind ArgoCD instead of a manual
