@@ -4,4 +4,4 @@ flask>=3.0
 gunicorn>=22.0
 dvc[s3]>=2.0
 mlflow>=3.15
-xgboost>=3.4
+xgboost>=2.0,<3.4
